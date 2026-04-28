@@ -3,6 +3,7 @@ import { saveMemory, getUnconsolidatedMemories, Memory } from './db.js';
 import { embeddingToBuffer, isDuplicateMemory, checkForContradiction } from './embeddings.js';
 import { logger } from './logger.js';
 import { readEnvFile } from './env.js';
+import { publishDashboardEvent } from './dashboard.js';
 
 const env = readEnvFile();
 const MEMORY_EXTRACTION_ENABLED = env['MEMORY_EXTRACTION_ENABLED'] !== 'false';
@@ -116,6 +117,7 @@ export async function ingestConversationTurn(
     });
     
     logger.debug({ memoryId, chatId }, 'Stored fallback memory');
+    publishDashboardEvent('memory.created', { id: memoryId, chatId, agentId, importance: 0.3 });
     return memoryId;
   }
 
@@ -167,6 +169,7 @@ export async function ingestConversationTurn(
   });
 
   logger.debug({ memoryId, chatId, importance: extracted.importance }, 'Memory ingested');
+  publishDashboardEvent('memory.created', { id: memoryId, chatId, agentId, importance: extracted.importance });
   return memoryId;
 }
 

@@ -342,6 +342,15 @@ export function initDatabase(): void {
     )
   `);
 
+  // Skill approvals (for dangerous skills)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS skill_approvals (
+      skill_name TEXT PRIMARY KEY,
+      approved_by INTEGER NOT NULL,
+      approved_at INTEGER NOT NULL
+    )
+  `);
+
   // Session summaries for long conversations
   db.exec(`
     CREATE TABLE IF NOT EXISTS session_summaries (
@@ -1349,6 +1358,44 @@ export function getSkillUsageStats(since?: number): Array<{
     success_rate: number;
     avg_duration_ms: number;
   }>;
+}
+
+// ============================================
+// SKILL APPROVAL OPERATIONS
+// ============================================
+
+export interface SkillApproval {
+  skill_name: string;
+  approved_by: number;
+  approved_at: number;
+}
+
+export function saveSkillApproval(skillName: string, userId: number): void {
+  const stmt = db.prepare(`
+    INSERT INTO skill_approvals (skill_name, approved_by, approved_at)
+    VALUES (?, ?, ?)
+    ON CONFLICT(skill_name) DO UPDATE SET
+      approved_by = excluded.approved_by,
+      approved_at = excluded.approved_at
+  `);
+  stmt.run(skillName, userId, Date.now());
+}
+
+export function getSkillApproval(skillName: string, userId: number): SkillApproval | undefined {
+  const stmt = db.prepare(
+    'SELECT * FROM skill_approvals WHERE skill_name = ? AND approved_by = ?'
+  );
+  return stmt.get(skillName, userId) as SkillApproval | undefined;
+}
+
+export function getAllSkillApprovals(): SkillApproval[] {
+  const stmt = db.prepare('SELECT * FROM skill_approvals ORDER BY skill_name');
+  return stmt.all() as SkillApproval[];
+}
+
+export function revokeSkillApproval(skillName: string): void {
+  const stmt = db.prepare('DELETE FROM skill_approvals WHERE skill_name = ?');
+  stmt.run(skillName);
 }
 
 // ============================================

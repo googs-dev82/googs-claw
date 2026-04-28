@@ -478,14 +478,17 @@ export function renderDashboard(data: DashboardData): string {
     }
 
     // Polling & Data Fetching
+    let isUpdating = false;
     async function updateStats() {
+      if (isUpdating) return;
+      isUpdating = true;
       try {
-        const [statsRes, agentsRes, tasksRes, hiveRes, tokensRes] = await Promise.all([
+        const [statsRes, tasksRes, agentsRes, hiveRes, tokensRes] = await Promise.all([
           fetch('/api/stats'),
-          fetch('/api/agents'),
           fetch('/api/tasks'),
-          fetch('/api/hive-mind?limit=20'),
-          fetch('/api/tokens')
+          fetch('/api/agents'),
+          fetch('/api/hive-feed'),
+          fetch('/api/token-usage')
         ]);
 
         const stats = await statsRes.json();
@@ -523,6 +526,8 @@ export function renderDashboard(data: DashboardData): string {
         console.error('Fetch error', e);
         document.getElementById('conn-status').textContent = '● Disconnected';
         document.getElementById('conn-status').style.color = 'var(--danger)';
+      } finally {
+        isUpdating = false;
       }
     }
 
@@ -646,8 +651,8 @@ export function renderDashboard(data: DashboardData): string {
 
     // Init
     initChart();
-    setInterval(updateStats, 5000);
-    setInterval(checkWarRoom, 5000);
+    setInterval(updateStats, 30000);
+    setInterval(checkWarRoom, 30000);
     updateStats();
     checkWarRoom();
     searchMemories();
@@ -662,7 +667,7 @@ export function renderDashboard(data: DashboardData): string {
       document.getElementById('conn-status').textContent = '● Connected';
       document.getElementById('conn-status').style.color = 'var(--success)';
     });
-    ['memory.deleted', 'task.created', 'task.deleted', 'agent.scaffolded'].forEach(type => {
+    ['memory.deleted', 'memory.created', 'memory.consolidated', 'task.created', 'task.deleted', 'agent.scaffolded'].forEach(type => {
       evtSource.addEventListener(type, () => {
         updateStats();
         searchMemories();

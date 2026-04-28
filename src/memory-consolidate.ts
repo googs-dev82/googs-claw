@@ -9,6 +9,7 @@ import {
 } from './db.js';
 import { logger } from './logger.js';
 import { readEnvFile } from './env.js';
+import { publishDashboardEvent } from './dashboard.js';
 
 const env = readEnvFile();
 const CONSOLIDATION_INTERVAL_MS = parseInt(env['CONSOLIDATION_INTERVAL_MS'] ?? '3600000', 10); // 1 hour default
@@ -88,6 +89,8 @@ Analyze these memories and create a consolidated summary.`;
     markMemoriesConsolidated(memories.map(m => m.id));
 
     logger.info({ consolidationId, chatId, memoryCount: memories.length }, 'Consolidation complete');
+    
+    publishDashboardEvent('memory.consolidated', { id: consolidationId, chatId, memoryCount: memories.length });
 
     return { ...consolidation, id: consolidationId };
   } catch (error) {

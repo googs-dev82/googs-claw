@@ -7,12 +7,21 @@ import cronParser from 'cron-parser';
 import { randomUUID } from 'crypto';
 import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
-import { createTask, logTokenUsage } from './db.js';
+import { createTask, logTokenUsage, logSkillUsage } from './db.js';
 import { STORE_DIR } from './config.js';
 import { mkdirSync, readdirSync, readFileSync, writeFileSync, statSync, existsSync } from 'fs';
 import { resolve, relative, join, dirname } from 'path';
 import { exec } from 'child_process';
 import { promisify } from 'util';
+import { 
+  discoverSkills, 
+  getSkillCatalog, 
+  loadSkill, 
+  loadSkillWithApproval,
+  isDangerousSkill,
+  approveSkill,
+  isSkillApproved 
+} from './skills.js';
 
 const env = readEnvFile();
 const execAsync = promisify(exec);
@@ -374,6 +383,20 @@ const providerTools = [
           replace: { type: 'string' },
         },
         required: ['path', 'search', 'replace'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'Skill',
+      description: 'Load and use a skill for specialized tasks. Skills are reusable workflows that match user requests. Use this tool when you need specialized behavior like creating changelogs, building MCP servers, or testing web apps.',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: 'Name of the skill to load' },
+          query: { type: 'string', description: 'Search query to find matching skills' },
+        },
       },
     },
   },
@@ -783,6 +806,45 @@ async function executeProviderTool(
       }
       writeFileSync(file, current.replace(search, replace));
       return `Edited ${relative(TOOL_ROOT, file)}`;
+    }
+    case 'Skill': {
+      const name = String(args.name ?? '').trim();
+      const query = String(args.query ?? '').trim();
+      
+      // If query provided, search for matching skills
+      if (query && !name) {
+        const skills = discoverSkills();
+        const matches = skills.filter(s => 
+          s.name.toLowerCase().includes(query.toLowerCase()) ||
+          s.description.toLowerCase().includes(query.toLowerCase())
+        );
+        if (matches.length === 0) {
+          return `No skills found matching "${query}". Available skills:\n${getSkillCatalog()}`;
+        }
+        return `Matching skills:\n${matches.map(s => `- ${s.name}: ${s.description}`).join('\n')}`;
+      }
+      
+      // If name provided, load the skill
+      if (!name) {
+        return `Skill name or query required. Available skills:\n${getSkillCatalog()}`;
+      }
+      
+      const startTime = Date.now();
+      const allowDangerous = TOOL_ALLOW_BASH || TOOL_ALLOW_EDIT;
+      const result = loadSkillWithApproval(name, undefined, allowDangerous);
+      
+      if (result.content === null) {
+        if (result.requiresApproval) {
+          return `Skill "${name}" requires user approval before use. Please confirm you want to use this dangerous skill.`;
+        }
+        return `Skill "${name}" not found. Available skills:\n${getSkillCatalog()}`;
+      }
+      
+      // Log skill usage
+      logSkillUsage(name, true, Date.now() - startTime);
+      
+      const status = result.sanitized ? '[SANITIZED]' : '';
+      return `Loaded skill: ${name} ${status}\n\n${result.content}`;
     }
     default:
       throw new Error(`Unknown tool: ${name}`);

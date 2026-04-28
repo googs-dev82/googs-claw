@@ -144,6 +144,67 @@ ClaudeClaw uses a sophisticated memory system:
 
 Memory is automatically consolidated every hour, and decay removes irrelevant memories.
 
+## Skill System
+
+ClaudeClaw supports a Skill System that enables specialized, reusable workflows. Skills are defined in markdown files stored in the `skills/` folder.
+
+### Adding Skills
+
+Add skills by creating a folder in `skills/` with a `SKILL.md` file:
+
+```
+skills/
+├── changelog-generator/
+│   └── SKILL.md
+├── mcp-builder/
+│   └── SKILL.md
+└── webapp-testing/
+    └── SKILL.md
+```
+
+### SKILL.md Format
+
+```markdown
+---
+name: skill-name
+description: Brief description of what this skill does
+---
+
+# Skill Name
+
+## When to Use
+
+- Use case 1
+- Use case 2
+
+## What This Skill Does
+
+1. Step 1
+2. Step 2
+```
+
+### Using Skills
+
+Agents automatically discover skills from the `skills/` folder. When a user request matches a skill's description, the agent loads and uses it.
+
+To manually query skills:
+- Use `Skill(name="skill-name")` to load a specific skill
+- Use `Skill(query="keyword")` to search for matching skills
+
+### Security
+
+Skills containing dangerous keywords (bash, edit, delete, etc.) are automatically sanitized. User approval is required for dangerous skills on first use.
+
+### Available Skills
+
+Run `discoverSkills()` to see all available skills. The system includes 55+ pre-built skills including:
+- changelog-generator - Create changelogs from git commits
+- mcp-builder - Create MCP servers
+- webapp-testing - Test web apps with Playwright
+- skill-creator - Create new skills
+- file-organizer - Organize files
+- And more...
+
 ## Multi-Agent System
 
 Define agents in `agents/agent.yaml`:
