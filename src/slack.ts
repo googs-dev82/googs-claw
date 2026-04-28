@@ -5,6 +5,9 @@ import { orchestrator } from './orchestrator.js';
 import { isAuthorized } from './security.js';
 import { checkPromptInjection, sanitizeInput } from './exfiltration-guard.js';
 import { saveSlackMessage } from './db.js';
+import { agentExists } from './agent-config.js';
+import { encryptField } from './security.js';
+import { globalChatQueue } from './queue.js';
 
 const env = readEnvFile();
 
@@ -78,75 +81,94 @@ async function handleAppMention(event: any, client: any): Promise<void> {
   try {
     const userId = event.user;
     const channelId = event.channel;
-    const threadTs = event.thread_ts || event.ts;
-    const text = event.text.replace(/<@[A-Z0-9]+>/g, '').trim();
 
-    const userInfo = await client.users.info({ user: userId });
-    const senderName = userInfo.user?.real_name || userInfo.user?.name || 'Unknown';
+    await globalChatQueue.enqueue(channelId, async () => {
+      const threadTs = event.thread_ts || event.ts;
+      const text = event.text.replace(/<@[A-Z0-9]+>/g, '').trim();
 
-    // Save message to database
-    saveSlackMessage({
-      message_id: event.ts,
-      channel_id: channelId,
-      user_id: userId,
-      user_name: senderName,
-      message: text,
-      timestamp: parseInt(event.ts, 10) * 1000,
-      direction: 'incoming',
-    });
+      const userInfo = await client.users.info({ user: userId });
+      const senderName = userInfo.user?.real_name || userInfo.user?.name || 'Unknown';
 
-    // Check authorization
-    const authId = `slack:${userId}`;
-    if (!isAuthorized(authId, 'slack')) {
+      // Save message to database
+      saveSlackMessage({
+        message_id: event.ts,
+        channel_id: channelId,
+        user_id: userId,
+        user_name: senderName,
+        message: encryptField(text),
+        timestamp: parseInt(event.ts, 10) * 1000,
+        direction: 'incoming',
+      });
+
+      // Check authorization
+      const authId = `slack:${userId}`;
+      if (!isAuthorized(authId, 'slack')) {
+        await client.chat.postMessage({
+          channel: channelId,
+          thread_ts: threadTs,
+          text: `Sorry <@${userId}>, you are not authorized to use this bot.`,
+        });
+        return;
+      }
+
+      // Check for prompt injection
+      if (checkPromptInjection(text)) {
+        await client.chat.postMessage({
+          channel: channelId,
+          thread_ts: threadTs,
+          text: 'Message rejected for security reasons.',
+        });
+        return;
+      }
+
+      let sanitizedMessage = sanitizeInput(text);
+      let agentId = 'main';
+
+      // Handle inline agent routing e.g. "@ops deploy"
+      const match = sanitizedMessage.match(/^@([a-zA-Z0-9_-]+)\s+(.*)/s);
+      if (match) {
+        const requestedAgent = match[1];
+        if (agentExists(requestedAgent)) {
+          agentId = requestedAgent;
+          sanitizedMessage = match[2];
+          await client.chat.postMessage({
+            channel: channelId,
+            thread_ts: threadTs,
+            text: `[Routing request to @${agentId}]`,
+          });
+        }
+      }
+
+      // Process through orchestrator
+      const result = await orchestrator.runWithContext(
+        channelId,
+        sanitizedMessage,
+        agentId,
+        true
+      );
+
+      // Send response
       await client.chat.postMessage({
         channel: channelId,
         thread_ts: threadTs,
-        text: `Sorry <@${userId}>, you are not authorized to use this bot.`,
+        text: result.content,
+        username: 'ClaudeClaw',
+        icon_emoji: ':robot_face:',
       });
-      return;
-    }
 
-    // Check for prompt injection
-    if (checkPromptInjection(text)) {
-      await client.chat.postMessage({
-        channel: channelId,
-        thread_ts: threadTs,
-        text: 'Message rejected for security reasons.',
+      // Save outgoing message
+      saveSlackMessage({
+        message_id: `out_${Date.now()}`,
+        channel_id: channelId,
+        user_id: 'ClaudeClaw',
+        user_name: 'ClaudeClaw',
+        message: encryptField(result.content),
+        timestamp: Date.now(),
+        direction: 'outgoing',
       });
-      return;
-    }
 
-    const sanitizedMessage = sanitizeInput(text);
-
-    // Process through orchestrator
-    const result = await orchestrator.runWithContext(
-      channelId,
-      sanitizedMessage,
-      'main',
-      true
-    );
-
-    // Send response
-    await client.chat.postMessage({
-      channel: channelId,
-      thread_ts: threadTs,
-      text: result.content,
-      username: 'ClaudeClaw',
-      icon_emoji: ':robot_face:',
+      logger.info({ channelId, userId, senderName }, 'Slack app_mention processed');
     });
-
-    // Save outgoing message
-    saveSlackMessage({
-      message_id: `out_${Date.now()}`,
-      channel_id: channelId,
-      user_id: 'ClaudeClaw',
-      user_name: 'ClaudeClaw',
-      message: result.content,
-      timestamp: Date.now(),
-      direction: 'outgoing',
-    });
-
-    logger.info({ channelId, userId, senderName }, 'Slack app_mention processed');
   } catch (error) {
     logger.error({ error }, 'Error handling Slack app_mention');
   }
@@ -164,60 +186,78 @@ async function handleMessage(event: any, client: any): Promise<void> {
   try {
     const userId = event.user;
     const channelId = event.channel;
-    const text = event.text;
 
-    const userInfo = await client.users.info({ user: userId });
-    const senderName = userInfo.user?.real_name || userInfo.user?.name || 'Unknown';
+    await globalChatQueue.enqueue(channelId, async () => {
+      const text = event.text;
 
-    // Save message
-    saveSlackMessage({
-      message_id: event.ts,
-      channel_id: channelId,
-      user_id: userId,
-      user_name: senderName,
-      message: text,
-      timestamp: parseInt(event.ts, 10) * 1000,
-      direction: 'incoming',
-    });
+      const userInfo = await client.users.info({ user: userId });
+      const senderName = userInfo.user?.real_name || userInfo.user?.name || 'Unknown';
 
-    // Check authorization
-    const authId = `slack:${userId}`;
-    if (!isAuthorized(authId, 'slack')) {
+      // Save message
+      saveSlackMessage({
+        message_id: event.ts,
+        channel_id: channelId,
+        user_id: userId,
+        user_name: senderName,
+        message: encryptField(text),
+        timestamp: parseInt(event.ts, 10) * 1000,
+        direction: 'incoming',
+      });
+
+      // Check authorization
+      const authId = `slack:${userId}`;
+      if (!isAuthorized(authId, 'slack')) {
+        await client.chat.postMessage({
+          channel: channelId,
+          text: `Sorry, you are not authorized to use this bot.`,
+        });
+        return;
+      }
+
+      // Check for prompt injection
+      if (checkPromptInjection(text)) {
+        await client.chat.postMessage({
+          channel: channelId,
+          text: 'Message rejected for security reasons.',
+        });
+        return;
+      }
+
+      let sanitizedMessage = sanitizeInput(text);
+      let agentId = 'main';
+
+      // Handle inline agent routing e.g. "@ops deploy"
+      const match = sanitizedMessage.match(/^@([a-zA-Z0-9_-]+)\s+(.*)/s);
+      if (match) {
+        const requestedAgent = match[1];
+        if (agentExists(requestedAgent)) {
+          agentId = requestedAgent;
+          sanitizedMessage = match[2];
+          await client.chat.postMessage({
+            channel: channelId,
+            text: `[Routing request to @${agentId}]`,
+          });
+        }
+      }
+
+      // Process through orchestrator
+      const result = await orchestrator.runWithContext(
+        channelId,
+        sanitizedMessage,
+        agentId,
+        true
+      );
+
+      // Send response
       await client.chat.postMessage({
         channel: channelId,
-        text: `Sorry, you are not authorized to use this bot.`,
+        text: result.content,
+        username: 'ClaudeClaw',
+        icon_emoji: ':robot_face:',
       });
-      return;
-    }
 
-    // Check for prompt injection
-    if (checkPromptInjection(text)) {
-      await client.chat.postMessage({
-        channel: channelId,
-        text: 'Message rejected for security reasons.',
-      });
-      return;
-    }
-
-    const sanitizedMessage = sanitizeInput(text);
-
-    // Process through orchestrator
-    const result = await orchestrator.runWithContext(
-      channelId,
-      sanitizedMessage,
-      'main',
-      true
-    );
-
-    // Send response
-    await client.chat.postMessage({
-      channel: channelId,
-      text: result.content,
-      username: 'ClaudeClaw',
-      icon_emoji: ':robot_face:',
+      logger.info({ channelId, userId }, 'Slack DM processed');
     });
-
-    logger.info({ channelId, userId }, 'Slack DM processed');
   } catch (error) {
     logger.error({ error }, 'Error handling Slack DM');
   }
@@ -236,63 +276,81 @@ async function handleSlashCommand(
   try {
     const userId = command.user_id;
     const channelId = command.channel_id;
-    const text = command.text.trim();
 
-    const userInfo = await slackApp?.client.users.info({ user: userId });
-    const senderName = userInfo?.user?.real_name || userInfo?.user?.name || 'Unknown';
+    await globalChatQueue.enqueue(channelId, async () => {
+      const text = command.text.trim();
 
-    // Check authorization
-    const authId = `slack:${userId}`;
-    if (!isAuthorized(authId, 'slack')) {
+      const userInfo = await slackApp?.client.users.info({ user: userId });
+      const senderName = userInfo?.user?.real_name || userInfo?.user?.name || 'Unknown';
+
+      // Check authorization
+      const authId = `slack:${userId}`;
+      if (!isAuthorized(authId, 'slack')) {
+        await respond({
+          response_type: 'ephemeral',
+          text: `Sorry <@${userId}>, you are not authorized to use this bot.`,
+        });
+        return;
+      }
+
+      if (!text) {
+        await respond({
+          response_type: 'ephemeral',
+          text: 'Usage: /claude <message>\nExample: /claude What is the weather today?',
+        });
+        return;
+      }
+
+      // Check for prompt injection
+      if (checkPromptInjection(text)) {
+        await respond({
+          response_type: 'ephemeral',
+          text: 'Message rejected for security reasons.',
+        });
+        return;
+      }
+
+      let sanitizedMessage = sanitizeInput(text);
+      let agentId = 'main';
+
+      // Handle inline agent routing e.g. "@ops deploy"
+      const match = sanitizedMessage.match(/^@([a-zA-Z0-9_-]+)\s+(.*)/s);
+      if (match) {
+        const requestedAgent = match[1];
+        if (agentExists(requestedAgent)) {
+          agentId = requestedAgent;
+          sanitizedMessage = match[2];
+          await respond({
+            response_type: 'in_channel',
+            text: `[Routing request to @${agentId}]`,
+          });
+        }
+      }
+
+      // Show "thinking" response
       await respond({
-        response_type: 'ephemeral',
-        text: `Sorry <@${userId}>, you are not authorized to use this bot.`,
+        response_type: 'in_channel',
+        text: `<@${userId}> I'm thinking...`,
       });
-      return;
-    }
 
-    if (!text) {
+      // Process through orchestrator
+      const result = await orchestrator.runWithContext(
+        channelId,
+        sanitizedMessage,
+        agentId,
+        true
+      );
+
+      // Send final response
       await respond({
-        response_type: 'ephemeral',
-        text: 'Usage: /claude <message>\nExample: /claude What is the weather today?',
+        response_type: 'in_channel',
+        text: result.content,
+        username: 'ClaudeClaw',
+        icon_emoji: ':robot_face:',
       });
-      return;
-    }
 
-    // Check for prompt injection
-    if (checkPromptInjection(text)) {
-      await respond({
-        response_type: 'ephemeral',
-        text: 'Message rejected for security reasons.',
-      });
-      return;
-    }
-
-    const sanitizedMessage = sanitizeInput(text);
-
-    // Show "thinking" response
-    await respond({
-      response_type: 'in_channel',
-      text: `<@${userId}> I'm thinking...`,
+      logger.info({ channelId, userId, command: text }, 'Slack slash command processed');
     });
-
-    // Process through orchestrator
-    const result = await orchestrator.runWithContext(
-      channelId,
-      sanitizedMessage,
-      'main',
-      true
-    );
-
-    // Send final response
-    await respond({
-      response_type: 'in_channel',
-      text: result.content,
-      username: 'ClaudeClaw',
-      icon_emoji: ':robot_face:',
-    });
-
-    logger.info({ channelId, userId, command: text }, 'Slack slash command processed');
   } catch (error) {
     logger.error({ error }, 'Error handling Slack slash command');
     await respond({

@@ -6,6 +6,9 @@ import { orchestrator } from './orchestrator.js';
 import { isAuthorized } from './security.js';
 import { checkPromptInjection, sanitizeInput } from './exfiltration-guard.js';
 import { saveWAMessage } from './db.js';
+import { agentExists } from './agent-config.js';
+import { encryptField } from './security.js';
+import { globalChatQueue } from './queue.js';
 
 const env = readEnvFile();
 const { Client, LocalAuth, MessageMedia } = whatsapp;
@@ -92,61 +95,76 @@ async function handleIncomingMessage(message: any): Promise<void> {
     }
 
     const chatId = message.from;
-    const senderName = message.author || message.from.split('@')[0];
-    const messageText = message.body;
 
-    // Save message to database
-    saveWAMessage({
-      message_id: message.id._serialized,
-      chat_id: chatId,
-      sender: senderName,
-      message: messageText,
-      timestamp: message.timestamp * 1000,
-      direction: 'incoming',
+    await globalChatQueue.enqueue(chatId, async () => {
+      const senderName = message.author || message.from.split('@')[0];
+      const messageText = message.body;
+
+      // Save message to database
+      saveWAMessage({
+        message_id: message.id._serialized,
+        chat_id: chatId,
+        sender: senderName,
+        message: encryptField(messageText),
+        timestamp: message.timestamp * 1000,
+        direction: 'incoming',
+      });
+
+      // Check authorization
+      if (!isAuthorized(chatId, 'whatsapp')) {
+        logger.warn({ chatId, senderName }, 'Unauthorized WhatsApp message');
+        await message.reply('Sorry, you are not authorized to use this bot.');
+        return;
+      }
+
+      // Check for prompt injection
+      if (checkPromptInjection(messageText)) {
+        logger.warn({ chatId }, 'Prompt injection detected in WhatsApp message');
+        await message.reply('Message rejected for security reasons.');
+        return;
+      }
+
+      let sanitizedMessage = sanitizeInput(messageText);
+      let agentId = 'main';
+
+      // Handle inline agent routing e.g. "@ops deploy"
+      const match = sanitizedMessage.match(/^@([a-zA-Z0-9_-]+)\s+(.*)/s);
+      if (match) {
+        const requestedAgent = match[1];
+        if (agentExists(requestedAgent)) {
+          agentId = requestedAgent;
+          sanitizedMessage = match[2];
+          await message.reply(`[Routing request to @${agentId}]`);
+        }
+      }
+
+      // Call message handler if provided
+      if (messageHandler) {
+        await messageHandler(chatId, sanitizedMessage, senderName);
+      } else {
+        // Default: process through orchestrator
+        const result = await orchestrator.runWithContext(
+          chatId,
+          sanitizedMessage,
+          agentId,
+          true
+        );
+
+        await message.reply(result.content);
+
+        // Save outgoing message
+        saveWAMessage({
+          message_id: `out_${Date.now()}`,
+          chat_id: chatId,
+          sender: 'ClaudeClaw',
+          message: encryptField(result.content),
+          timestamp: Date.now(),
+          direction: 'outgoing',
+        });
+      }
+
+      logger.info({ chatId, senderName, messageLength: messageText.length }, 'WhatsApp message processed');
     });
-
-    // Check authorization
-    if (!isAuthorized(chatId, 'whatsapp')) {
-      logger.warn({ chatId, senderName }, 'Unauthorized WhatsApp message');
-      await message.reply('Sorry, you are not authorized to use this bot.');
-      return;
-    }
-
-    // Check for prompt injection
-    if (checkPromptInjection(messageText)) {
-      logger.warn({ chatId }, 'Prompt injection detected in WhatsApp message');
-      await message.reply('Message rejected for security reasons.');
-      return;
-    }
-
-    const sanitizedMessage = sanitizeInput(messageText);
-
-    // Call message handler if provided
-    if (messageHandler) {
-      await messageHandler(chatId, sanitizedMessage, senderName);
-    } else {
-      // Default: process through orchestrator
-      const result = await orchestrator.runWithContext(
-        chatId,
-        sanitizedMessage,
-        'main',
-        true
-      );
-
-      await message.reply(result.content);
-    }
-
-    // Save outgoing message
-    saveWAMessage({
-      message_id: `out_${Date.now()}`,
-      chat_id: chatId,
-      sender: 'ClaudeClaw',
-      message: messageText,
-      timestamp: Date.now(),
-      direction: 'outgoing',
-    });
-
-    logger.info({ chatId, senderName, messageLength: messageText.length }, 'WhatsApp message processed');
   } catch (error) {
     logger.error({ error }, 'Error handling WhatsApp message');
   }

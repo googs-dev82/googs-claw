@@ -1,327 +1,51 @@
 import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
+import { randomUUID } from 'crypto';
 import { logger } from './logger.js';
-import { readEnvFile } from './env.js';
-import { getAllMemories, getMemoryStats, searchMemories, deleteMemory, getSessionSummaries, getTokenUsageStats } from './db.js';
-import { getSchedulerStatus, getScheduledTasks } from './scheduler.js';
+import { PROJECT_ROOT, readEnvFile } from './env.js';
+import { spawn, ChildProcess } from 'child_process';
+import path from 'path';
+import { existsSync, mkdirSync, writeFileSync } from 'fs';
+import { pathToFileURL } from 'url';
+import { getAllMemories, getMemoryStats, searchMemories, deleteMemory, getSessionSummaries, getTokenUsageStats, getRecentHiveMind } from './db.js';
+import { getSchedulerStatus, getScheduledTasks, createScheduledTask, removeScheduledTask } from './scheduler.js';
 import { getWhatsAppStatus } from './whatsapp.js';
 import { getSlackStatus } from './slack.js';
 import { getVoiceHealthStatus } from './voice.js';
 import { getSecurityStats } from './security.js';
+import { renderDashboard, DashboardData } from './dashboard-html.js';
+import { getAllAgents, saveAgentConfigToDb, validateAgentId } from './agent-config.js';
+import { getWarRoomHTML } from './warroom-html.js';
 
 const env = readEnvFile();
+export const app = new Hono();
+const textEncoder = new TextEncoder();
+const DASHBOARD_AUTH_TOKEN = env['DASHBOARD_AUTH_TOKEN'] || '';
 
-const app = new Hono();
+type DashboardEvent = {
+  type: string;
+  payload?: unknown;
+  timestamp: number;
+};
 
-/**
- * Get dashboard HTML
- */
-function getDashboardHTML(stats: any): string {
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ClaudeClaw Dashboard</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      background: #0d1117;
-      color: #c9d1d9;
-      min-height: 100vh;
-    }
-    .container { max-width: 1400px; margin: 0 auto; padding: 20px; }
-    header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 30px;
-      padding-bottom: 20px;
-      border-bottom: 1px solid #30363d;
-    }
-    h1 { color: #58a6ff; font-size: 28px; }
-    .status-badge {
-      padding: 6px 12px;
-      border-radius: 20px;
-      font-size: 14px;
-      font-weight: 500;
-    }
-    .status-ok { background: #238636; color: #fff; }
-    .status-warn { background: #9e6a03; color: #fff; }
-    .status-error { background: #da3633; color: #fff; }
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-      gap: 20px;
-      margin-bottom: 30px;
-    }
-    .card {
-      background: #161b22;
-      border: 1px solid #30363d;
-      border-radius: 8px;
-      padding: 20px;
-    }
-    .card h2 {
-      color: #8b949e;
-      font-size: 14px;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-      margin-bottom: 15px;
-    }
-    .stat {
-      display: flex;
-      justify-content: space-between;
-      padding: 10px 0;
-      border-bottom: 1px solid #30363d;
-    }
-    .stat:last-child { border-bottom: none; }
-    .stat-label { color: #8b949e; }
-    .stat-value { color: #58a6ff; font-weight: 600; }
-    .progress-bar {
-      height: 8px;
-      background: #30363d;
-      border-radius: 4px;
-      margin-top: 10px;
-      overflow: hidden;
-    }
-    .progress-fill {
-      height: 100%;
-      background: linear-gradient(90deg, #58a6ff, #238636);
-      border-radius: 4px;
-      transition: width 0.3s ease;
-    }
-    .memory-list {
-      max-height: 300px;
-      overflow-y: auto;
-    }
-    .memory-item {
-      padding: 12px;
-      background: #0d1117;
-      border-radius: 6px;
-      margin-bottom: 8px;
-      font-size: 14px;
-      line-height: 1.5;
-    }
-    .memory-item .meta {
-      color: #8b949e;
-      font-size: 12px;
-      margin-top: 8px;
-    }
-    .search-box {
-      width: 100%;
-      padding: 12px;
-      background: #0d1117;
-      border: 1px solid #30363d;
-      border-radius: 6px;
-      color: #c9d1d9;
-      font-size: 14px;
-      margin-bottom: 15px;
-    }
-    .search-box:focus {
-      outline: none;
-      border-color: #58a6ff;
-    }
-    .btn {
-      padding: 8px 16px;
-      background: #238636;
-      color: #fff;
-      border: none;
-      border-radius: 6px;
-      cursor: pointer;
-      font-size: 14px;
-    }
-    .btn:hover { background: #2ea043; }
-    .btn-danger { background: #da3633; }
-    .btn-danger:hover { background: #f85149; }
-    .tabs {
-      display: flex;
-      gap: 10px;
-      margin-bottom: 20px;
-    }
-    .tab {
-      padding: 10px 20px;
-      background: #161b22;
-      border: 1px solid #30363d;
-      border-radius: 6px;
-      color: #8b949e;
-      cursor: pointer;
-    }
-    .tab.active {
-      background: #58a6ff;
-      color: #fff;
-      border-color: #58a6ff;
-    }
-    .tab-content { display: none; }
-    .tab-content.active { display: block; }
-    .service-status {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      padding: 10px;
-      background: #0d1117;
-      border-radius: 6px;
-      margin-bottom: 10px;
-    }
-    .dot {
-      width: 10px;
-      height: 10px;
-      border-radius: 50%;
-    }
-    .dot.green { background: #238636; }
-    .dot.red { background: #da3633; }
-    .dot.yellow { background: #9e6a03; }
-    @keyframes pulse {
-      0%, 100% { opacity: 1; }
-      50% { opacity: 0.5; }
-    }
-    .loading { animation: pulse 1.5s infinite; }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <header>
-      <h1>🤖 ClaudeClaw Dashboard</h1>
-      <span class="status-badge status-ok">System Online</span>
-    </header>
+const eventClients = new Set<ReadableStreamDefaultController<Uint8Array>>();
 
-    <div class="grid">
-      <div class="card">
-        <h2>📊 System Status</h2>
-        <div class="stat"><span class="stat-label">Uptime</span><span class="stat-value" id="uptime">Loading...</span></div>
-        <div class="stat"><span class="stat-label">Memory Usage</span><span class="stat-value" id="memory">Loading...</span></div>
-        <div class="stat"><span class="stat-label">CPU Load</span><span class="stat-value" id="cpu">Loading...</span></div>
-      </div>
+export function publishDashboardEvent(type: string, payload?: unknown): void {
+  const event: DashboardEvent = { type, payload, timestamp: Date.now() };
+  const message = `event: ${type}\ndata: ${JSON.stringify(event)}\n\n`;
 
-      <div class="card">
-        <h2>💬 Platform Status</h2>
-        <div class="service-status">
-          <span class="dot green"></span>
-          <span>Telegram</span>
-          <span class="stat-value">Active</span>
-        </div>
-        <div class="service-status">
-          <span class="dot ${stats.whatsapp?.ready ? 'green' : 'yellow'}"></span>
-          <span>WhatsApp</span>
-          <span class="stat-value">${stats.whatsapp?.ready ? 'Active' : 'Disconnected'}</span>
-        </div>
-        <div class="service-status">
-          <span class="dot ${stats.slack?.ready ? 'green' : 'yellow'}"></span>
-          <span>Slack</span>
-          <span class="stat-value">${stats.slack?.ready ? 'Active' : 'Disconnected'}</span>
-        </div>
-        <div class="service-status">
-          <span class="dot ${stats.voice?.healthy ? 'green' : 'red'}"></span>
-          <span>Voice</span>
-          <span class="stat-value">${stats.voice?.healthy ? 'Healthy' : 'Error'}</span>
-        </div>
-      </div>
-
-      <div class="card">
-        <h2>🧠 Memory System</h2>
-        <div class="stat"><span class="stat-label">Total Memories</span><span class="stat-value">${stats.memory?.total || 0}</span></div>
-        <div class="stat"><span class="stat-label">Short-term</span><span class="stat-value">${stats.memory?.shortTerm || 0}</span></div>
-        <div class="stat"><span class="stat-label">Long-term</span><span class="stat-value">${stats.memory?.longTerm || 0}</span></div>
-        <div class="stat"><span class="stat-label">Consolidations</span><span class="stat-value">${stats.memory?.consolidations || 0}</span></div>
-        <div class="progress-bar">
-          <div class="progress-fill" style="width: ${Math.min((stats.memory?.total || 0) / 1000 * 100, 100)}%"></div>
-        </div>
-      </div>
-
-      <div class="card">
-        <h2>🔐 Security</h2>
-        <div class="stat"><span class="stat-label">Authorized Users</span><span class="stat-value">${stats.security?.authorizedUsers || 0}</span></div>
-        <div class="stat"><span class="stat-label">Blocked Users</span><span class="stat-value">${stats.security?.blockedUsers || 0}</span></div>
-        <div class="stat"><span class="stat-label">Rate Limited</span><span class="stat-value">${stats.security?.rateLimited || 0}</span></div>
-        <div class="stat"><span class="stat-label">Suspicious Blocked</span><span class="stat-value">${stats.security?.suspiciousBlocked || 0}</span></div>
-      </div>
-
-      <div class="card">
-        <h2>📅 Scheduler</h2>
-        <div class="stat"><span class="stat-label">Status</span><span class="stat-value">${stats.scheduler?.running ? 'Running' : 'Stopped'}</span></div>
-        <div class="stat"><span class="stat-label">Total Tasks</span><span class="stat-value">${stats.scheduler?.totalTasks || 0}</span></div>
-        <div class="stat"><span class="stat-label">Due Tasks</span><span class="stat-value">${stats.scheduler?.dueTasks || 0}</span></div>
-      </div>
-
-      <div class="card">
-        <h2>💰 Token Usage (Today)</h2>
-        <div class="stat"><span class="stat-label">Input Tokens</span><span class="stat-value">${stats.tokens?.input || 0}</span></div>
-        <div class="stat"><span class="stat-label">Output Tokens</span><span class="stat-value">${stats.tokens?.output || 0}</span></div>
-        <div class="stat"><span class="stat-label">Total Cost</span><span class="stat-value">$${((stats.tokens?.totalCost || 0) / 100).toFixed(2)}</span></div>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>🔍 Memory Search</h2>
-      <input type="text" class="search-box" id="searchInput" placeholder="Search memories...">
-      <div class="memory-list" id="memoryResults">
-        ${stats.recentMemories?.map((m: any) => {
-          const content = String(m.content ?? m.summary ?? m.raw_text ?? '');
-          const type = String(m.memory_type ?? m.source ?? 'memory');
-          const importance = typeof m.importance === 'number' ? m.importance.toFixed(2) : 'n/a';
-          return `
-          <div class="memory-item">
-            ${content.slice(0, 200)}${content.length > 200 ? '...' : ''}
-            <div class="meta">Type: ${type} | Importance: ${importance} | ${new Date(m.created_at).toLocaleDateString()}</div>
-          </div>
-        `;
-        }).join('') || '<p style="color: #8b949e;">No memories yet</p>'}
-      </div>
-    </div>
-  </div>
-
-  <script>
-    let startTime = Date.now();
-    
-    function updateStats() {
-      fetch('/api/stats')
-        .then(r => r.json())
-        .then(data => {
-          document.getElementById('uptime').textContent = data.uptime;
-          document.getElementById('memory').textContent = data.memory;
-          document.getElementById('cpu').textContent = data.cpu;
-        })
-        .catch(console.error);
+  for (const client of [...eventClients]) {
+    try {
+      client.enqueue(textEncoder.encode(message));
+    } catch (error) {
+      eventClients.delete(client);
+      logger.warn({ error, type }, 'Removed closed dashboard SSE client');
     }
-
-    document.getElementById('searchInput')?.addEventListener('input', (e) => {
-      const query = e.target.value;
-      if (query.length < 3) return;
-      
-      fetch('/api/memories/search?q=' + encodeURIComponent(query))
-        .then(r => r.json())
-        .then(memories => {
-          const container = document.getElementById('memoryResults');
-          if (memories.length === 0) {
-            container.innerHTML = '<p style="color: #8b949e;">No results found</p>';
-          } else {
-            container.innerHTML = memories.map(m => {
-              const content = String(m.content || m.summary || m.raw_text || '');
-              const type = m.memory_type || m.source || 'memory';
-              const importance = typeof m.importance === 'number' ? m.importance.toFixed(2) : 'n/a';
-              return \`
-              <div class="memory-item">
-                \${content.slice(0, 200)}\${content.length > 200 ? '...' : ''}
-                <div class="meta">Type: \${type} | Importance: \${importance}</div>
-              </div>
-            \`;
-            }).join('');
-          }
-        });
-    });
-
-    setInterval(updateStats, 5000);
-    updateStats();
-  </script>
-</body>
-</html>`;
+  }
 }
 
-/**
- * Get all dashboard stats
- */
-export function getDashboardStats() {
+export function getDashboardStats(): DashboardData {
   const memoryStats = getMemoryStats();
   const securityStats = getSecurityStats();
   const schedulerStatus = getSchedulerStatus();
@@ -330,7 +54,6 @@ export function getDashboardStats() {
   const tokenStats = getTokenUsageStats();
   const orchestratorStatus = { active: true };
 
-  // Get recent memories
   const recentMemories = getAllMemories()
     .sort((a, b) => b.created_at - a.created_at)
     .slice(0, 10);
@@ -351,6 +74,30 @@ export function getDashboardStats() {
 // Middleware
 app.use('*', cors());
 
+function isDashboardAuthorized(request: Request): boolean {
+  if (!DASHBOARD_AUTH_TOKEN) {
+    return true;
+  }
+
+  const url = new URL(request.url);
+  const bearer = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '');
+  return bearer === DASHBOARD_AUTH_TOKEN
+    || request.headers.get('x-dashboard-token') === DASHBOARD_AUTH_TOKEN
+    || url.searchParams.get('token') === DASHBOARD_AUTH_TOKEN;
+}
+
+app.use('/api/*', async (c, next) => {
+  if (c.req.path === '/api/events') {
+    return next();
+  }
+
+  if (!isDashboardAuthorized(c.req.raw)) {
+    return c.json({ error: 'Unauthorized' }, 401);
+  }
+
+  return next();
+});
+
 // Health check
 app.get('/health', (c) => {
   return c.json({ status: 'ok', timestamp: Date.now() });
@@ -359,7 +106,12 @@ app.get('/health', (c) => {
 // Dashboard HTML
 app.get('/', (c) => {
   const stats = getDashboardStats();
-  return c.html(getDashboardHTML(stats));
+  return c.html(renderDashboard(stats));
+});
+
+// War Room HTML
+app.get('/warroom', (c) => {
+  return c.html(getWarRoomHTML());
 });
 
 // API: Stats
@@ -375,91 +127,205 @@ app.get('/api/stats', (c) => {
 });
 
 // API: Memories
-app.get('/api/memories', (c) => {
-  const memories = getAllMemories();
-  return c.json(memories);
-});
-
-// API: Search memories
+app.get('/api/memories', (c) => c.json(getAllMemories()));
 app.get('/api/memories/search', (c) => {
   const query = c.req.query('q');
-  if (!query) {
-    return c.json([]);
-  }
-  
-  const results = searchMemories(query);
-  return c.json(results);
+  return c.json(query ? searchMemories(query) : []);
 });
-
-// API: Delete memory
 app.delete('/api/memories/:id', async (c) => {
-  const id = c.req.param('id');
-  deleteMemory(Number(id));
+  const id = Number(c.req.param('id'));
+  deleteMemory(id);
+  publishDashboardEvent('memory.deleted', { id });
   return c.json({ success: true });
 });
 
 // API: Scheduler tasks
-app.get('/api/scheduler/tasks', (c) => {
-  const tasks = getScheduledTasks();
-  return c.json(tasks);
+app.get('/api/tasks', (c) => c.json(getScheduledTasks()));
+app.post('/api/tasks', async (c) => {
+  const body = await c.req.json();
+  const { prompt, schedule, agent_id, chat_id } = body;
+  try {
+    const id = randomUUID();
+    const task = createScheduledTask(id, chat_id, prompt, schedule, agent_id || 'main');
+    publishDashboardEvent('task.created', { id, agent_id: task.agent_id, chat_id: task.chat_id });
+    return c.json(task);
+  } catch (e: any) {
+    return c.json({ error: e.message }, 400);
+  }
+});
+app.delete('/api/tasks/:id', (c) => {
+  const id = c.req.param('id');
+  removeScheduledTask(id);
+  publishDashboardEvent('task.deleted', { id });
+  return c.json({ success: true });
+});
+
+// API: Agents
+app.get('/api/agents', (c) => c.json(getAllAgents()));
+app.post('/api/agents/scaffold', async (c) => {
+  const body = await c.req.json();
+  const { name, token, description, model } = body;
+  
+  if (!name || !token) return c.json({ success: false, error: 'Missing name or token' }, 400);
+
+  const safeName = String(name).trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '');
+  if (!validateAgentId(safeName)) {
+    return c.json({ success: false, error: 'Agent id must start with a lowercase letter and contain only lowercase letters, numbers, underscores, or hyphens.' }, 400);
+  }
+
+  const agents = getAllAgents();
+  if (!agents.some((agent) => agent.id === safeName) && agents.length >= 20) {
+    return c.json({ success: false, error: 'Agent limit reached (20).' }, 400);
+  }
+
+  const agentsDir = path.join(PROJECT_ROOT, 'agents');
+  const agentDir = path.join(agentsDir, safeName);
+  const agentYamlPath = path.join(agentDir, 'agent.yaml');
+  const claudeMdPath = path.join(agentDir, 'CLAUDE.md');
+
+  const now = Date.now();
+  const selectedModel = String(model || 'claude-sonnet-4-6');
+  const agentConfig = {
+    id: safeName,
+    name: String(name),
+    description: description ? String(description) : `Dashboard-created agent for ${name}.`,
+    model: selectedModel,
+    telegramToken: String(token),
+    cwd: agentDir,
+    claudeMdPath,
+    mcpAllowlist: ['Bash', 'Read', 'Edit', 'Grep', 'Glob', 'LS'],
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  try {
+    if (!existsSync(agentsDir)) {
+      mkdirSync(agentsDir, { recursive: true });
+    }
+    if (!existsSync(agentDir)) {
+      mkdirSync(agentDir, { recursive: true });
+    }
+    const yaml = [
+      `id: ${agentConfig.id}`,
+      `name: ${JSON.stringify(agentConfig.name)}`,
+      `description: ${JSON.stringify(agentConfig.description)}`,
+      `model: ${agentConfig.model}`,
+      `telegram_token: ${JSON.stringify(agentConfig.telegramToken)}`,
+      `mcp_allowlist: ${agentConfig.mcpAllowlist.join(',')}`,
+      '',
+    ].join('\n');
+    const claudeMd = [
+      `# Agent: ${agentConfig.name}`,
+      '',
+      `You are ${agentConfig.name}, a specialized ClaudeClaw agent.`,
+      '',
+      '## Role',
+      agentConfig.description,
+      '',
+      '## Operating Guidelines',
+      '- Stay within your role and explain assumptions when context is missing.',
+      '- Log important work to the shared hive mind through the orchestrator.',
+      '- Keep responses concise, useful, and safe for phone-first interaction.',
+      '',
+    ].join('\n');
+
+    writeFileSync(agentYamlPath, yaml);
+    writeFileSync(claudeMdPath, claudeMd);
+    saveAgentConfigToDb(agentConfig);
+    publishDashboardEvent('agent.scaffolded', { id: agentConfig.id, name: agentConfig.name });
+    return c.json({ success: true, agent: agentConfig, configPath: agentYamlPath });
+  } catch (e: any) {
+    return c.json({ success: false, error: e.message }, 500);
+  }
+});
+
+// API: Hive Mind
+app.get('/api/hive-mind', (c) => {
+  const limit = parseInt(c.req.query('limit') || '50', 10);
+  return c.json(getRecentHiveMind(limit));
 });
 
 // API: Token usage
-app.get('/api/tokens', (c) => {
-  const stats = getTokenUsageStats();
-  return c.json(stats);
+app.get('/api/tokens', (c) => c.json(getTokenUsageStats()));
+app.get('/api/sessions', (c) => c.json(getSessionSummaries()));
+app.get('/api/security', (c) => c.json(getSecurityStats()));
+
+// API: Events (SSE)
+app.get('/api/events', (c) => {
+  if (!isDashboardAuthorized(c.req.raw)) {
+    return c.json({ error: 'Unauthorized' }, 401);
+  }
+
+  c.header('Content-Type', 'text/event-stream');
+  c.header('Cache-Control', 'no-cache');
+  c.header('Connection', 'keep-alive');
+  
+  return new Response(new ReadableStream({
+    start(controller) {
+      eventClients.add(controller);
+      controller.enqueue(textEncoder.encode(`event: connected\ndata: ${JSON.stringify({ type: 'connected', timestamp: Date.now() })}\n\n`));
+      const interval = setInterval(() => {
+        controller.enqueue(textEncoder.encode(`event: ping\ndata: ${JSON.stringify({ type: 'ping', timestamp: Date.now() })}\n\n`));
+      }, 5000);
+      c.req.raw.signal.addEventListener('abort', () => {
+        clearInterval(interval);
+        eventClients.delete(controller);
+      });
+    }
+  }));
 });
 
-// API: Session summaries
-app.get('/api/sessions', (c) => {
-  const summaries = getSessionSummaries();
-  return c.json(summaries);
+// War Room process
+let warRoomProcess: ChildProcess | null = null;
+
+app.get('/api/warroom/status', (c) => c.json({ running: warRoomProcess !== null, pid: warRoomProcess?.pid || null }));
+
+app.post('/api/warroom/start', (c) => { 
+  if (!warRoomProcess) {
+    warRoomProcess = spawn('python3', [path.resolve(PROJECT_ROOT, 'warroom/warroom_pipecat.py')]);
+    warRoomProcess.stdout?.on('data', (data) => logger.info(`WarRoom: ${data}`));
+    warRoomProcess.stderr?.on('data', (data) => logger.error(`WarRoom: ${data}`));
+    warRoomProcess.on('exit', () => {
+      warRoomProcess = null;
+      publishDashboardEvent('warroom.stopped');
+    });
+    publishDashboardEvent('warroom.started', { pid: warRoomProcess.pid });
+  }
+  return c.json({ success: true, pid: warRoomProcess.pid }); 
 });
 
-// API: Security stats
-app.get('/api/security', (c) => {
-  const stats = getSecurityStats();
-  return c.json(stats);
+app.post('/api/warroom/stop', (c) => { 
+  if (warRoomProcess) {
+    warRoomProcess.kill();
+    warRoomProcess = null;
+    publishDashboardEvent('warroom.stopped');
+  }
+  return c.json({ success: true }); 
 });
 
-/**
- * Format uptime
- */
 function formatUptime(seconds: number): string {
   const days = Math.floor(seconds / 86400);
   const hours = Math.floor((seconds % 86400) / 3600);
   const minutes = Math.floor((seconds % 3600) / 60);
-  
   if (days > 0) return `${days}d ${hours}h ${minutes}m`;
   if (hours > 0) return `${hours}h ${minutes}m`;
   return `${minutes}m`;
 }
 
-/**
- * Format bytes
- */
 function formatBytes(bytes: number): string {
   const units = ['B', 'KB', 'MB', 'GB'];
   let unitIndex = 0;
   let size = bytes;
-  
   while (size >= 1024 && unitIndex < units.length - 1) {
     size /= 1024;
     unitIndex++;
   }
-  
   return size.toFixed(1) + ' ' + units[unitIndex];
 }
 
-/**
- * Start dashboard server
- */
 export function startDashboard(): void {
   const port = parseInt(env['DASHBOARD_PORT'] || '3141', 10);
-  const server = serve({
-    fetch: app.fetch,
-    port,
-  });
+  const server = serve({ fetch: app.fetch, port });
 
   server.on('error', (error: unknown) => {
     const message = String(error);
@@ -468,7 +334,6 @@ export function startDashboard(): void {
       console.log(`\n📊 Dashboard already running at http://localhost:${port}\n`);
       return;
     }
-
     logger.error({ port, error }, 'Dashboard server error');
   });
 
@@ -476,11 +341,10 @@ export function startDashboard(): void {
   console.log(`\n📊 Dashboard running at http://localhost:${port}\n`);
 }
 
-/**
- * Stop dashboard server
- */
 export function stopDashboard(): void {
-  // hono/node-server doesn't have a clean stop method
-  // In production, you'd use a more robust server setup
   logger.info('Dashboard server stopped');
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  startDashboard();
 }

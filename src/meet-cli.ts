@@ -10,6 +10,7 @@ import {
   type MeetSession,
 } from './db.js';
 import { readFileSync } from 'fs';
+import { fetchPreflightBriefing, joinMeetingWithAvatar } from '../skills/pikastream-video-meeting/index.js';
 
 const args = process.argv.slice(2);
 const command = args[0];
@@ -17,7 +18,7 @@ const command = args[0];
 async function main(): Promise<void> {
   switch (command) {
     case 'start':
-      startMeeting();
+      await startMeeting();
       break;
     case 'list':
       listMeetings();
@@ -33,7 +34,7 @@ async function main(): Promise<void> {
   }
 }
 
-function startMeeting(): void {
+async function startMeeting(): Promise<void> {
   const meetingUrl = args[1];
   const provider = args[2] || 'meet';
 
@@ -42,10 +43,17 @@ function startMeeting(): void {
     process.exit(1);
   }
 
+  // Pre-flight briefing (Gmail/Calendar integration)
+  const briefingData = await fetchPreflightBriefing(meetingUrl);
+  const initialBriefing = `Attendees: ${briefingData.attendees.join(', ')}\nContext: ${briefingData.meetingContext}\nRecent Emails:\n- ${briefingData.recentEmails.join('\n- ')}\n\n---\n\n`;
+
+  // Join meeting with avatar (Pikastream/Recall.ai)
+  const { botId } = await joinMeetingWithAvatar(meetingUrl, 'ClaudeClaw Avatar');
+
   const id = createMeetSession({
     meeting_url: meetingUrl,
-    meeting_title: provider,
-    briefing: null,
+    meeting_title: `${provider} (Bot: ${botId})`,
+    briefing: initialBriefing,
     summary: null,
     status: 'active',
     created_at: Date.now(),
@@ -53,6 +61,8 @@ function startMeeting(): void {
 
   console.log(`Meeting session started: ${id}`);
   console.log(`URL: ${meetingUrl}`);
+  console.log(`Bot ID: ${botId}`);
+  console.log('Pre-flight briefing generated.');
 }
 
 function listMeetings(): void {

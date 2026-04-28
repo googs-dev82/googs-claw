@@ -60,8 +60,8 @@ export const STORE_DIR = join(PROJECT_ROOT, 'store');
 export const MAX_MESSAGE_LENGTH = 4096; // Telegram limit
 export const TYPING_REFRESH_MS = 4000;
 export const CONSOLIDATION_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
-export const DASHBOARD_PORT = 3141;
-export const WARROOM_PORT = 7860;
+export const DASHBOARD_PORT = parseInt(env['DASHBOARD_PORT'] ?? '3141', 10);
+export const WARROOM_PORT = parseInt(env['WARROOM_PORT'] ?? '7860', 10);
 
 // Agent overrides for runtime reconfiguration
 interface AgentOverrides {

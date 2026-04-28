@@ -16,8 +16,14 @@ const env = readEnvFile();
  * Main entry point for ClaudeClaw
  */
 async function main() {
+  const agentId = parseAgentId(process.argv.slice(2));
+  if (agentId) {
+    process.env['CLAUDECLAW_AGENT_ID'] = agentId;
+    process.env['AGENT_ID'] = agentId;
+  }
+
   logger.info('Starting ClaudeClaw OS v2...');
-  console.log('\n🤖 ClaudeClaw OS v2\n');
+  console.log(`\n🤖 ClaudeClaw OS v2${agentId ? ` - Agent: ${agentId}` : ''}\n`);
 
   // Initialize database
   console.log('📦 Initializing database...');
@@ -37,7 +43,7 @@ async function main() {
   }
 
   // Initialize WhatsApp
-  const whatsappEnabled = env['WHATSAPP_ENABLED']?.toLowerCase() === 'true';
+  const whatsappEnabled = env['WHATSAPP_ENABLED']?.toLowerCase() === 'true' && !agentId;
   if (whatsappEnabled) {
     console.log('💬 Connecting to WhatsApp...');
     try {
@@ -49,7 +55,7 @@ async function main() {
   }
 
   // Initialize Slack
-  const slackEnabled = env['SLACK_ENABLED']?.toLowerCase() === 'true';
+  const slackEnabled = env['SLACK_ENABLED']?.toLowerCase() === 'true' && !agentId;
   if (slackEnabled) {
     console.log('💼 Connecting to Slack...');
     try {
@@ -61,7 +67,7 @@ async function main() {
   }
 
   // Start dashboard
-  const dashboardEnabled = env['DASHBOARD_ENABLED']?.toLowerCase() !== 'false';
+  const dashboardEnabled = env['DASHBOARD_ENABLED']?.toLowerCase() !== 'false' && !agentId;
   if (dashboardEnabled) {
     console.log('📊 Starting dashboard...');
     startDashboard();
@@ -69,7 +75,7 @@ async function main() {
   }
 
   // Start scheduler
-  const schedulerEnabled = env['SCHEDULER_ENABLED']?.toLowerCase() !== 'false';
+  const schedulerEnabled = env['SCHEDULER_ENABLED']?.toLowerCase() !== 'false' && !agentId;
   if (schedulerEnabled) {
     console.log('⏰ Starting scheduler...');
     startScheduler();
@@ -77,7 +83,7 @@ async function main() {
   }
 
   // Start memory consolidation
-  const consolidationEnabled = env['MEMORY_CONSOLIDATION_ENABLED']?.toLowerCase() !== 'false';
+  const consolidationEnabled = env['MEMORY_CONSOLIDATION_ENABLED']?.toLowerCase() !== 'false' && !agentId;
   if (consolidationEnabled) {
     console.log('🧠 Starting memory consolidation...');
     startConsolidationLoop();
@@ -85,7 +91,7 @@ async function main() {
   }
 
   // Initialize War Room bridge
-  const warroomEnabled = env['WARROOM_ENABLED']?.toLowerCase() === 'true';
+  const warroomEnabled = env['WARROOM_ENABLED']?.toLowerCase() === 'true' && !agentId;
   if (warroomEnabled) {
     console.log('🎙️ Initializing War Room bridge...');
     initWarRoomBridge();
@@ -93,7 +99,7 @@ async function main() {
   }
 
   // Run initial memory decay sweep
-  const memoryDecayEnabled = env['MEMORY_DECAY_ENABLED']?.toLowerCase() !== 'false';
+  const memoryDecayEnabled = env['MEMORY_DECAY_ENABLED']?.toLowerCase() !== 'false' && !agentId;
   if (memoryDecayEnabled) {
     console.log('🔄 Running initial memory decay sweep...');
     await runMemoryDecaySweep();
@@ -119,6 +125,20 @@ async function main() {
   // Handle graceful shutdown
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
+}
+
+function parseAgentId(args: string[]): string | null {
+  const inlineFlag = args.find((arg) => arg.startsWith('--agent='));
+  if (inlineFlag) {
+    return inlineFlag.slice('--agent='.length).trim() || null;
+  }
+
+  const flagIndex = args.indexOf('--agent');
+  if (flagIndex >= 0) {
+    return args[flagIndex + 1]?.trim() || null;
+  }
+
+  return process.env['CLAUDECLAW_AGENT_ID'] || process.env['AGENT_ID'] || null;
 }
 
 /**

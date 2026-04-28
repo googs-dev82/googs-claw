@@ -10,9 +10,11 @@ import { saveConversationTurn } from './memory.js';
 import { getRecentTurns } from './db.js';
 import { speechToText } from './voice.js';
 import { clearSelectedAgent, getSelectedAgent, setSelectedAgent } from './state.js';
-import { getAgentConfig, loadAllAgentConfigs } from './agent-config.js';
+import { getAgentConfig, getAllAgents, agentExists } from './agent-config.js';
 
 const env = readEnvFile();
+const TELEGRAM_MESSAGE_LIMIT = 4096;
+const TELEGRAM_SAFE_CHUNK_SIZE = 3900;
 
 let bot: Bot | null = null;
 let isReady = false;
@@ -22,9 +24,13 @@ export async function initTelegram(): Promise<Bot> {
     return bot;
   }
 
-  const token = env['TELEGRAM_BOT_TOKEN'];
+  const runtimeEnv = readEnvFile();
+  const processAgentId = process.env['CLAUDECLAW_AGENT_ID'] || process.env['AGENT_ID'] || '';
+  const token = resolveTelegramToken(processAgentId, runtimeEnv);
   if (!token) {
-    throw new Error('TELEGRAM_BOT_TOKEN is required');
+    throw new Error(processAgentId
+      ? `Telegram token is required for agent "${processAgentId}"`
+      : 'TELEGRAM_BOT_TOKEN is required');
   }
 
   bot = new Bot(token);
@@ -68,7 +74,7 @@ export async function initTelegram(): Promise<Bot> {
 
   bot.command('agents', async (ctx) => {
     const current = getChatAgentId(getChatId(ctx));
-    const agents = loadAllAgentConfigs();
+    const agents = getAllAgents();
 
     if (agents.length === 0) {
       await ctx.reply(`No agent configs found. Current agent: ${current}`);
@@ -89,7 +95,7 @@ export async function initTelegram(): Promise<Bot> {
     const current = getChatAgentId(chatId);
 
     if (!raw) {
-      const agents = loadAllAgentConfigs();
+      const agents = getAllAgents();
       await ctx.reply(
         [
           `Current agent: ${current}`,
@@ -111,7 +117,7 @@ export async function initTelegram(): Promise<Bot> {
 
     const agent = getAgentConfig(requested);
     if (!agent) {
-      const agents = loadAllAgentConfigs();
+      const agents = getAllAgents();
       await ctx.reply(
         [
           `Unknown agent: ${requested}`,
@@ -222,7 +228,7 @@ async function handleTextMessage(ctx: Context): Promise<void> {
     await processUserPrompt(ctx, sanitizeInput(rawText));
   } catch (error) {
     logger.error({ error, chatId }, 'Error handling Telegram message');
-    await ctx.reply(`Error: ${String(error)}`);
+    await replyLong(ctx, `Error: ${formatErrorForUser(error)}`);
   }
 }
 
@@ -262,7 +268,8 @@ async function handleVoiceMessage(ctx: Context): Promise<void> {
       return;
     }
 
-    const fileUrl = `https://api.telegram.org/file/bot${env['TELEGRAM_BOT_TOKEN']}/${file.file_path}`;
+    const runtimeToken = resolveTelegramToken(process.env['CLAUDECLAW_AGENT_ID'] || process.env['AGENT_ID'] || '', readEnvFile());
+    const fileUrl = `https://api.telegram.org/file/bot${runtimeToken}/${file.file_path}`;
     const response = await fetch(fileUrl);
     if (!response.ok) {
       await ctx.reply(`Could not download voice message from Telegram (${response.status}).`);
@@ -280,20 +287,33 @@ async function handleVoiceMessage(ctx: Context): Promise<void> {
     await processUserPrompt(ctx, transcription);
   } catch (error) {
     logger.error({ error, chatId }, 'Error handling Telegram voice message');
-    await ctx.reply(`Voice error: ${String(error)}`);
+    await replyLong(ctx, `Voice error: ${formatErrorForUser(error)}`);
   }
 }
 
 async function processUserPrompt(ctx: Context, text: string): Promise<void> {
   const chatId = getChatId(ctx);
-  const agentId = getChatAgentId(chatId);
+  let agentId = getChatAgentId(chatId);
+  let processText = text.trim();
+
+  // Handle inline agent routing e.g. "@ops deploy"
+  const match = processText.match(/^@([a-zA-Z0-9_-]+)\s+(.*)/s);
+  if (match) {
+    const requestedAgent = match[1];
+    if (agentExists(requestedAgent)) {
+      agentId = requestedAgent;
+      processText = match[2];
+      await ctx.reply(`[Routing request to @${agentId}]`);
+    }
+  }
+
   await ctx.replyWithChatAction('typing');
 
-  await saveConversationTurn(chatId, 'user', text, agentId, false);
-  const result = await orchestrator.runWithContext(chatId, text, agentId, true);
+  await saveConversationTurn(chatId, 'user', processText, agentId, false);
+  const result = await orchestrator.runWithContext(chatId, processText, agentId, true);
   await saveConversationTurn(chatId, 'assistant', result.content, agentId, true);
 
-  await ctx.reply(result.content || '(No response)');
+  await replyLong(ctx, result.content || '(No response)');
 }
 
 function getChatId(ctx: Context): string {
@@ -301,7 +321,61 @@ function getChatId(ctx: Context): string {
 }
 
 function getChatAgentId(chatId: string): string {
-  return getSelectedAgent(chatId) ?? env['DEFAULT_AGENT_ID'] ?? 'main';
+  return process.env['CLAUDECLAW_AGENT_ID']
+    || process.env['AGENT_ID']
+    || getSelectedAgent(chatId)
+    || env['DEFAULT_AGENT_ID']
+    || 'main';
+}
+
+function resolveTelegramToken(agentId: string, runtimeEnv: Record<string, string>): string {
+  if (agentId) {
+    const config = getAgentConfig(agentId);
+    const envKey = `${agentId.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_TELEGRAM_TOKEN`;
+    return config?.telegramToken || runtimeEnv[envKey] || runtimeEnv['TELEGRAM_BOT_TOKEN'] || '';
+  }
+
+  return runtimeEnv['TELEGRAM_BOT_TOKEN'] || '';
+}
+
+export function splitTelegramMessage(message: string): string[] {
+  if (message.length <= TELEGRAM_MESSAGE_LIMIT) {
+    return [message];
+  }
+
+  const chunks: string[] = [];
+  let remaining = message;
+
+  while (remaining.length > TELEGRAM_SAFE_CHUNK_SIZE) {
+    const slice = remaining.slice(0, TELEGRAM_SAFE_CHUNK_SIZE);
+    const splitAt = Math.max(
+      slice.lastIndexOf('\n\n'),
+      slice.lastIndexOf('\n'),
+      slice.lastIndexOf('. '),
+      slice.lastIndexOf(' ')
+    );
+    const cut = splitAt > 1000 ? splitAt + (slice[splitAt] === '.' ? 1 : 0) : TELEGRAM_SAFE_CHUNK_SIZE;
+    chunks.push(remaining.slice(0, cut).trimEnd());
+    remaining = remaining.slice(cut).trimStart();
+  }
+
+  if (remaining) {
+    chunks.push(remaining);
+  }
+
+  return chunks;
+}
+
+async function replyLong(ctx: Context, message: string): Promise<void> {
+  const chunks = splitTelegramMessage(message);
+  for (const chunk of chunks) {
+    await ctx.reply(chunk);
+  }
+}
+
+function formatErrorForUser(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.length > 1500 ? `${message.slice(0, 1500)}...` : message;
 }
 
 export async function sendTelegramMessage(chatId: string, message: string): Promise<void> {
@@ -309,7 +383,9 @@ export async function sendTelegramMessage(chatId: string, message: string): Prom
     throw new Error('Telegram bot not ready');
   }
 
-  await bot.api.sendMessage(chatId, message);
+  for (const chunk of splitTelegramMessage(message)) {
+    await bot.api.sendMessage(chatId, chunk);
+  }
 }
 
 export async function sendTelegramVoice(

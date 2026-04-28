@@ -56,6 +56,46 @@ export function checkExfiltration(content: string): ExfiltrationCheckResult {
     }
   }
 
+  // Base64 secret scanning
+  const base64Regex = /(?:[A-Za-z0-9+/]{4}){5,}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?/g;
+  const base64Matches = content.match(base64Regex) || [];
+  for (const match of base64Matches) {
+    try {
+      const decoded = Buffer.from(match, 'base64').toString('utf8');
+      for (const pattern of SENSITIVE_PATTERNS) {
+        // Reset lastIndex for global regexes
+        pattern.lastIndex = 0;
+        if (pattern.test(decoded)) {
+          issues.push(`Sensitive data found in Base64 encoded string: ${pattern.source}`);
+          break;
+        }
+      }
+    } catch (e) {
+      // Ignore invalid base64
+    }
+  }
+
+  // URL-encoded secret scanning
+  const urlEncodedRegex = /(?:%[0-9A-Fa-f]{2})+/g;
+  const urlEncodedMatches = content.match(urlEncodedRegex) || [];
+  for (const match of urlEncodedMatches) {
+    if (match.length > 20) { // Only check sufficiently long encoded strings
+      try {
+        const decoded = decodeURIComponent(match);
+        for (const pattern of SENSITIVE_PATTERNS) {
+          // Reset lastIndex for global regexes
+          pattern.lastIndex = 0;
+          if (pattern.test(decoded)) {
+            issues.push(`Sensitive data found in URL-encoded string: ${pattern.source}`);
+            break;
+          }
+        }
+      } catch (e) {
+        // Ignore invalid URL encoding
+      }
+    }
+  }
+
   return {
     safe: issues.length === 0,
     issues,

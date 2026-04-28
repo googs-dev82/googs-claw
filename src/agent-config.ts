@@ -15,6 +15,7 @@ import {
 const env = readEnvFile();
 const PROJECT_ROOT = env['PROJECT_ROOT_DIR'] ?? ENV_PROJECT_ROOT;
 const AGENTS_DIR = join(PROJECT_ROOT, 'agents');
+const AGENT_ID_PATTERN = /^[a-z][a-z0-9_-]{0,29}$/;
 
 export interface AgentConfig {
   id: string;
@@ -39,6 +40,10 @@ interface AggregateAgentYaml {
     system_prompt?: string;
     tools?: string[];
   }>;
+}
+
+export function validateAgentId(agentId: string): boolean {
+  return AGENT_ID_PATTERN.test(agentId);
 }
 
 /**
@@ -207,6 +212,23 @@ export function loadAllAgentConfigs(): AgentConfig[] {
   return configs;
 }
 
+function loadAllAggregateAgentConfigs(): AgentConfig[] {
+  const yamlPath = join(AGENTS_DIR, 'agent.yaml');
+  if (!existsSync(yamlPath)) {
+    return [];
+  }
+
+  try {
+    const parsed = yaml.load(readFileSync(yamlPath, 'utf-8')) as AggregateAgentYaml | null;
+    return (parsed?.agents ?? [])
+      .map((entry) => entry.id ? loadAggregateAgentConfig(entry.id) : null)
+      .filter((config): config is AgentConfig => config !== null);
+  } catch (error) {
+    logger.warn({ error, path: yamlPath }, 'Failed to load aggregate agent configs');
+    return [];
+  }
+}
+
 /**
  * Get agent configuration (from DB or file system)
  */
@@ -282,9 +304,7 @@ export function getAllAgents(): AgentConfig[] {
 
   const fileConfigs = [
     ...loadAllAgentConfigs(),
-    ...(['main', 'comms', 'content', 'ops', 'research']
-      .map((id) => loadAggregateAgentConfig(id))
-      .filter((config): config is AgentConfig => config !== null)),
+    ...loadAllAggregateAgentConfigs(),
   ];
   
   // Merge, preferring DB configs
